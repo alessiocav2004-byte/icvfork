@@ -4085,6 +4085,79 @@ function limitResultsByResolution(streams, limit) {
     return filtered;
 }
 
+const DEBRID_STREAM_SERVICES = new Set(['realdebrid', 'torbox', 'alldebrid']);
+
+function isDebridHttpStream(stream) {
+    if (!stream || typeof stream !== 'object') return false;
+    if (DEBRID_STREAM_SERVICES.has(stream._meta?.service)) return true;
+
+    const streamUrl = typeof stream.url === 'string' ? stream.url : '';
+    return /\/(?:rd-stream|torbox-stream|ad-stream)\//.test(streamUrl);
+}
+
+function stripTorrentFieldsFromDebridStream(stream, force = false) {
+    if (!force && !isDebridHttpStream(stream)) return stream;
+
+    const sanitized = { ...stream };
+    delete sanitized.infoHash;
+    delete sanitized.fileIdx;
+    delete sanitized.sources;
+    delete sanitized.magnetLink;
+
+    if (sanitized._meta && typeof sanitized._meta === 'object') {
+        sanitized._meta = { ...sanitized._meta };
+        delete sanitized._meta.infoHash;
+        delete sanitized._meta.magnetLink;
+    }
+
+    if (sanitized.behaviorHints && typeof sanitized.behaviorHints === 'object') {
+        sanitized.behaviorHints = { ...sanitized.behaviorHints };
+        delete sanitized.behaviorHints.infoHash;
+        delete sanitized.behaviorHints.fileIdx;
+        delete sanitized.behaviorHints.magnetLink;
+    }
+
+    return sanitized;
+}
+
+function sanitizeStreamsForDebridMode(streams, debridEnabled) {
+    if (!debridEnabled || !Array.isArray(streams)) return streams;
+
+    const sanitized = [];
+    let removedTorrentStreams = 0;
+    let strippedDebridFields = 0;
+
+    for (const stream of streams) {
+        const streamUrl = typeof stream?.url === 'string' ? stream.url : '';
+        const isMagnetUrl = streamUrl.startsWith('magnet:');
+        const isTorrentOnly = !!stream?.infoHash && !streamUrl;
+        const hasTorrentFields = !!stream?.infoHash ||
+            !!stream?.fileIdx ||
+            !!stream?.sources ||
+            !!stream?.magnetLink ||
+            !!stream?._meta?.infoHash ||
+            !!stream?._meta?.magnetLink ||
+            !!stream?.behaviorHints?.infoHash ||
+            !!stream?.behaviorHints?.fileIdx ||
+            !!stream?.behaviorHints?.magnetLink;
+
+        if (isMagnetUrl || isTorrentOnly) {
+            removedTorrentStreams++;
+            continue;
+        }
+
+        const cleanedStream = stripTorrentFieldsFromDebridStream(stream, !!streamUrl && hasTorrentFields);
+        if (cleanedStream !== stream) strippedDebridFields++;
+        sanitized.push(cleanedStream);
+    }
+
+    if (removedTorrentStreams > 0 || strippedDebridFields > 0) {
+        console.log(`🧹 [Debrid] Sanitized final streams: removed ${removedTorrentStreams} torrent streams, stripped torrent fields from ${strippedDebridFields} HTTP streams`);
+    }
+
+    return sanitized;
+}
+
 // ✅ NUOVA FUNZIONE: Limita i risultati per qualità
 function limitResultsByQuality(results, limit = 3) {
     const qualityCounts = {};
@@ -10536,11 +10609,10 @@ async function handleStream(type, id, config, workerOrigin) {
                         debugInfo
                     ].filter(Boolean).join('\n');
 
-                    // Build stream with infoHash for P2P fallback
+                    // Debrid streams must expose only the HTTP resolver URL.
                     const rdStream = {
                         name: streamName,
                         title: streamTitle,
-                        infoHash: result.infoHash,
                         url: streamUrl,
                         // AIOStreams: Explicitly pass sizes at root level if needed (Ensure NUMBER)
                         size: isPack ? Number(result.file_size || result.sizeInBytes || 0) : Number(result.sizeInBytes || 0),
@@ -10558,7 +10630,6 @@ async function handleStream(type, id, config, workerOrigin) {
                             ...(isPack && result.title ? { folderName: result.title } : {})
                         },
                         _meta: {
-                            infoHash: result.infoHash,
                             cached: isCached,
                             cacheSource: cacheType,
                             service: 'realdebrid',
@@ -10568,11 +10639,6 @@ async function handleStream(type, id, config, workerOrigin) {
                             error: streamError
                         }
                     };
-
-                    // Add fileIdx for pack torrents (P2P fallback support)
-                    if (result.fileIndex !== null && result.fileIndex !== undefined) {
-                        rdStream.fileIdx = result.fileIndex;
-                    }
 
                     // ✅ Apply custom formatter if configured
                     applyCustomFormatter(rdStream, result, config, 'RD', isCached);
@@ -10775,11 +10841,10 @@ async function handleStream(type, id, config, workerOrigin) {
                         lastLine
                     ].filter(Boolean).join('\n');
 
-                    // Build stream with infoHash for P2P fallback
+                    // Debrid streams must expose only the HTTP resolver URL.
                     const torboxStream = {
                         name: streamName,
                         title: streamTitle,
-                        infoHash: result.infoHash,
                         url: streamUrl,
                         // AIOStreams: Explicitly pass sizes at root level (Ensure NUMBER)
                         size: isPack ? Number(result.file_size || result.sizeInBytes || 0) : Number(result.sizeInBytes || 0),
@@ -10797,7 +10862,6 @@ async function handleStream(type, id, config, workerOrigin) {
                             ...(isPack && result.title ? { folderName: result.title } : {})
                         },
                         _meta: {
-                            infoHash: result.infoHash,
                             cached: isCached,
                             cacheSource: cacheType,
                             service: 'torbox',
@@ -10806,11 +10870,6 @@ async function handleStream(type, id, config, workerOrigin) {
                             seeders: result.seeders
                         }
                     };
-
-                    // Add fileIdx for pack torrents (P2P fallback support)
-                    if (result.fileIndex !== null && result.fileIndex !== undefined) {
-                        torboxStream.fileIdx = result.fileIndex;
-                    }
 
                     // ✅ Apply custom formatter if configured
                     applyCustomFormatter(torboxStream, result, config, 'TB', isCached);
@@ -10971,11 +11030,10 @@ async function handleStream(type, id, config, workerOrigin) {
                         lastLine
                     ].filter(Boolean).join('\n');
 
-                    // Build stream with infoHash for P2P fallback
+                    // Debrid streams must expose only the HTTP resolver URL.
                     const adStream = {
                         name: streamName,
                         title: streamTitle,
-                        infoHash: result.infoHash,
                         url: streamUrl,
                         // AIOStreams (Ensure NUMBER)
                         size: isPack ? Number(result.file_size || result.sizeInBytes || 0) : Number(result.sizeInBytes || 0),
@@ -10988,7 +11046,6 @@ async function handleStream(type, id, config, workerOrigin) {
                             ...(cleanMainFilename ? { filename: cleanMainFilename } : {})
                         },
                         _meta: {
-                            infoHash: result.infoHash,
                             cached: isCached,
                             cacheSource: cacheType,
                             service: 'alldebrid',
@@ -10997,10 +11054,6 @@ async function handleStream(type, id, config, workerOrigin) {
                             seeders: result.seeders
                         }
                     };
-
-                    if (result.fileIndex !== null && result.fileIndex !== undefined) {
-                        adStream.fileIdx = result.fileIndex;
-                    }
 
                     // ⚡ ONLY CACHED FILTER
                     if (!config.only_debrid_cache || isCached) {
@@ -11179,7 +11232,11 @@ async function handleStream(type, id, config, workerOrigin) {
             } catch (error) {
                 console.error(`❌ Error processing result:`, error);
 
-                // Return a basic stream even if processing failed
+                if (useRealDebrid || useTorbox || useAllDebrid) {
+                    console.warn(`⚠️ [Debrid] Skipping error fallback for "${result.title?.substring(0, 50) || 'unknown'}" to avoid returning a magnet/torrent stream.`);
+                    continue;
+                }
+
                 streams.push({
                     name: `❌ ${result.title} (Error)`,
                     title: `Error processing: ${error.message}`,
@@ -11352,7 +11409,7 @@ async function handleStream(type, id, config, workerOrigin) {
             }
         }
 
-
+        streams = sanitizeStreamsForDebridMode(streams, useRealDebrid || useTorbox || useAllDebrid);
 
         const cachedCount = streams.filter(s => s.name.includes('⚡')).length;
         const totalTime = Date.now() - startTime;
