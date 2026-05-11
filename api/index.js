@@ -1038,7 +1038,7 @@ const _runSequentialBackgroundJobs = async (options) => {
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
 // ✅ Torrentio placeholder videos (hosted by Torrentio)
-const TORRENTIO_VIDEO_BASE = 'https://torrentio.strem.fun';
+const TORRENTIO_VIDEO_BASE = 'https://raw.githubusercontent.com/qwertyuiop8899/logo/main';
 
 // ✅ Safe Base64 encoding/decoding for Node.js
 const atob = (str) => Buffer.from(str, 'base64').toString('utf-8');
@@ -4245,7 +4245,8 @@ class RealDebrid {
     }
 
     _isInfringingFileError(error) {
-        return error && [20, 29].includes(error.error_code);
+        // Codes 20/29 are documented RD codes; 35 is observed in newer Torrentio builds.
+        return error && [20, 29, 35].includes(error.error_code);
     }
 
     _isLimitExceededError(error) {
@@ -4258,6 +4259,44 @@ class RealDebrid {
 
     _isFailedDownloadError(error) {
         return error && [16, 19, 21, 22, 23, 25, 26, 27].includes(error.error_code);
+    }
+
+    // 🔥 True if the error is a "terminal" RD error that maps to a specific placeholder MP4
+    // (used to short-circuit cache/predict/fallback loops and let the outer catch render the
+    // right Torrentio-style placeholder instead of the generic download_failed one).
+    _isTerminalRdError(error) {
+        return this._isAccessDeniedError(error)
+            || this._isInfringingFileError(error)
+            || this._isLimitExceededError(error)
+            || this._isTorrentTooBigError(error)
+            || this._isFailedDownloadError(error);
+    }
+
+    // 🔥 Internal helper: always parse the JSON body (even on !response.ok) so that
+    // Real-Debrid's { error, error_code } payload survives as `err.error_code` /
+    // `err.status` on the thrown Error. This is what unlocks the Torrentio-style
+    // error classification (infringing / access_denied / limit_exceeded / ...).
+    async _parseRdResponse(response, contextLabel) {
+        let data = null;
+        try {
+            data = await response.json();
+        } catch (_) {
+            data = null;
+        }
+
+        if (!response.ok || (data && typeof data.error_code !== 'undefined')) {
+            const msg = (data && (data.error || data.error_message))
+                ? `${contextLabel}: ${data.error} (code ${data.error_code ?? '?'}, http ${response.status})`
+                : `${contextLabel}: HTTP ${response.status}`;
+            const err = new Error(msg);
+            err.error_code = data ? data.error_code : undefined;
+            err.error = data ? data.error : undefined;
+            err.status = response.status;
+            err.rdBody = data;
+            throw err;
+        }
+
+        return data;
     }
 
     async checkCache(hashes) {
@@ -4429,10 +4468,7 @@ class RealDebrid {
         const response = await fetch(`${this.baseUrl}/torrents`, {
             headers: { 'Authorization': `Bearer ${this.apiKey}` }
         });
-        if (!response.ok) {
-            throw new Error(`Failed to get torrents list from Real-Debrid: ${response.status}`);
-        }
-        return await response.json();
+        return await this._parseRdResponse(response, 'Failed to get torrents list from Real-Debrid');
     }
 
     async deleteTorrent(torrentId) {
@@ -4472,18 +4508,19 @@ class RealDebrid {
 
         // Any other status = error
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(`Failed to select files on Real-Debrid: ${response.status} - ${errorData.error || 'Unknown error'}`);
+        const err = new Error(`Failed to select files on Real-Debrid: ${response.status} - ${errorData.error || 'Unknown error'}`);
+        err.error_code = errorData.error_code;
+        err.error = errorData.error;
+        err.status = response.status;
+        err.rdBody = errorData;
+        throw err;
     }
 
     async getTorrentInfo(torrentId) {
         const response = await fetch(`${this.baseUrl}/torrents/info/${torrentId}`, {
             headers: { 'Authorization': `Bearer ${this.apiKey}` }
         });
-
-        if (!response.ok) {
-            throw new Error(`Failed to get torrent info from Real-Debrid: ${response.status}`);
-        }
-        return await response.json();
+        return await this._parseRdResponse(response, 'Failed to get torrent info from Real-Debrid');
     }
 
     async unrestrictLink(link) {
@@ -4498,11 +4535,9 @@ class RealDebrid {
             body: formData
         });
 
-        if (!response.ok) {
-            throw new Error(`Real-Debrid API error: ${response.status}`);
-        }
-
-        return await response.json();
+        // 🔥 Preserve RD's { error, error_code } on non-2xx so the outer catch can
+        // route to the correct Torrentio-style placeholder (infringing/access_denied/...).
+        return await this._parseRdResponse(response, 'Real-Debrid API error');
     }
 }
 
@@ -12781,7 +12816,7 @@ export default async function handler(req, res) {
 
                     if (!targetFile) {
                         console.log(`[RealDebrid] No video file found`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                     }
 
                     // 🔥 OPTIMIZED RD LINK RESOLUTION with DB cache
@@ -12890,6 +12925,12 @@ export default async function handler(req, res) {
                                         }
                                     } catch (cacheErr) {
                                         console.log(`[RealDebrid] ⚠️ DB cache unrestrict error: ${cacheErr.message}`);
+                                        // 🔥 If RD returned a terminal error code (infringing/access_denied/limit/too_big/failed),
+                                        // propagate to the outer catch so it can serve the correct placeholder MP4
+                                        // instead of silently falling through to the generic download_failed branch.
+                                        if (realdebrid._isTerminalRdError(cacheErr)) {
+                                            throw cacheErr;
+                                        }
                                     }
                                 }
                             }
@@ -12923,6 +12964,10 @@ export default async function handler(req, res) {
                                 }
                             } catch (err) {
                                 console.log(`[RealDebrid] ⚠️ Predicted index error: ${err.message}`);
+                                // 🔥 Same propagation logic as the DB cache pre-check above.
+                                if (realdebrid._isTerminalRdError(err)) {
+                                    throw err;
+                                }
                             }
                         }
 
@@ -12954,8 +12999,14 @@ export default async function handler(req, res) {
                                     }
                                 } catch (linkErr) {
                                     console.log(`[RealDebrid] ⚠️ Link[${i}] error: ${linkErr.message}`);
+                                    // 🔥 Terminal RD errors (infringing/access_denied/limit/too_big/failed) typically
+                                    // apply to the whole torrent hash, so abort the loop and let the outer catch
+                                    // render the correct placeholder MP4 (Torrentio-style behaviour).
+                                    if (realdebrid._isTerminalRdError(linkErr)) {
+                                        throw linkErr;
+                                    }
                                     // If rate limited (error_code 34), wait and retry
-                                    if (linkErr.message?.includes('429') || linkErr.message?.includes('Too many requests')) {
+                                    if (linkErr.error_code === 34 || linkErr.status === 429 || linkErr.message?.includes('429') || linkErr.message?.includes('Too many requests')) {
                                         console.log(`[RealDebrid] 🚦 Rate limited, waiting 2 seconds...`);
                                         await new Promise(resolve => setTimeout(resolve, 2000));
                                         i--; // Retry this index
@@ -13033,7 +13084,7 @@ export default async function handler(req, res) {
 
                     if (!unrestricted) {
                         console.log(`[RealDebrid] ❌ No matching link found for: ${targetFilename}`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                     }
 
                     console.log(`[RealDebrid] ✅ Final: link[${matchedIndex}] -> ${unrestricted.filename}`);
@@ -13041,31 +13092,31 @@ export default async function handler(req, res) {
                     // 🔥 Torrentio-style: Check for access denied errors
                     if (realdebrid._isAccessDeniedError(unrestricted)) {
                         console.log(`[RealDebrid] ❌ Access denied (error ${unrestricted.error_code})`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/access_denied_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/blocked_access_v1.mp4`);
                     }
 
                     // 🔥 Torrentio-style: Check for infringing file errors
                     if (realdebrid._isInfringingFileError(unrestricted)) {
                         console.log(`[RealDebrid] ❌ Infringing file (error ${unrestricted.error_code})`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/infringing_file_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_infringement_v2.mp4`);
                     }
 
                     // 🔥 Torrentio-style: Check for limit exceeded
                     if (realdebrid._isLimitExceededError(unrestricted)) {
                         console.log(`[RealDebrid] ❌ Limit exceeded (error ${unrestricted.error_code})`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/limit_exceeded_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/limits_exceeded_v1.mp4`);
                     }
 
                     // 🔥 Torrentio-style: Check for torrent too big
                     if (realdebrid._isTorrentTooBigError(unrestricted)) {
                         console.log(`[RealDebrid] ❌ Torrent too big (error ${unrestricted.error_code})`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/torrent_too_big_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_too_big_v1.mp4`);
                     }
 
                     // 🔥 Torrentio-style: Check for failed download
                     if (realdebrid._isFailedDownloadError(unrestricted)) {
                         console.log(`[RealDebrid] ❌ Failed download (error ${unrestricted.error_code})`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                     }
 
                     // ✅ CACHE SUCCESS: Refresh cache timestamp (+10 days from now)
@@ -13218,7 +13269,7 @@ export default async function handler(req, res) {
                     // Check if it's a RAR archive
                     if (unrestricted.download?.endsWith('.rar') || unrestricted.download?.endsWith('.zip')) {
                         console.log(`[RealDebrid] Failed: RAR archive`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_rar_v2.mp4`);
                     }
 
                     let finalUrl = unrestricted.download;
@@ -13235,7 +13286,7 @@ export default async function handler(req, res) {
                         } catch (mfError) {
                             console.error(`❌ [RealDebrid] MediaFlow proxy failed: ${mfError.message}`);
                             // 🛑 STOP! Do not fallback to direct link to avoid bans.
-                            return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                            return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                         }
                     }
 
@@ -13264,84 +13315,91 @@ export default async function handler(req, res) {
                 } else if (statusDownloading || statusOpening || statusWaitingSelection) {
                     // ⏳ DOWNLOADING: Show placeholder video
                     console.log(`[RealDebrid] Torrent is downloading (status: ${torrent.status})...`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/downloading_v2.mp4`);
 
                 } else if (statusMagnetError) {
                     // ❌ MAGNET ERROR: Show failed opening video
                     console.log(`[RealDebrid] Magnet error`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_opening_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_opening_v2.mp4`);
 
                 } else if (statusError) {
                     // ❌ ERROR: Show failed video
                     console.log(`[RealDebrid] Torrent failed`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                 }
 
                 // Fallback: something went wrong
                 console.log(`[RealDebrid] Unknown state (${torrent.status}), showing failed video`);
-                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
 
             } catch (error) {
-                console.error('👑 ❌ RD stream error:', error);
+                console.error('👑 ❌ RD stream error:', error, 'error_code=', error?.error_code, 'status=', error?.status);
 
                 // 🔥 Torrentio-style: Check for specific error codes
                 const realdebrid = new RealDebrid(userConfig.rd_key || '');
 
                 if (realdebrid._isAccessDeniedError(error)) {
                     console.log(`[RealDebrid] ❌ Access denied (error ${error.error_code})`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/access_denied_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/blocked_access_v1.mp4`);
                 }
 
                 if (realdebrid._isInfringingFileError(error)) {
                     console.log(`[RealDebrid] ❌ Infringing file (error ${error.error_code})`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/infringing_file_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_infringement_v2.mp4`);
                 }
 
                 if (realdebrid._isLimitExceededError(error)) {
                     console.log(`[RealDebrid] ❌ Limit exceeded (error ${error.error_code})`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/limit_exceeded_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/limits_exceeded_v1.mp4`);
                 }
 
                 if (realdebrid._isTorrentTooBigError(error)) {
                     console.log(`[RealDebrid] ❌ Torrent too big (error ${error.error_code})`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/torrent_too_big_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_too_big_v1.mp4`);
                 }
 
                 if (realdebrid._isFailedDownloadError(error)) {
                     console.log(`[RealDebrid] ❌ Failed download (error ${error.error_code})`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                 }
 
                 // Handle text-based error messages (legacy)
                 const errorMsg = error.message?.toLowerCase() || '';
+                const errorStatus = typeof error.status === 'number' ? error.status : null;
 
-                if (errorMsg.includes('429') || errorMsg.includes('rate limit')) {
-                    // Too many requests - show downloading placeholder
-                    console.log(`[RealDebrid] Rate limited, showing downloading placeholder`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
+                // 🔥 HTTP-status based fallback (kicks in when RD doesn't return a JSON error_code)
+                if (errorStatus === 403 || errorStatus === 451) {
+                    console.log(`[RealDebrid] HTTP ${errorStatus} → treating as infringing/access denied`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_infringement_v2.mp4`);
                 }
 
-                if (errorMsg.includes('400') || errorMsg.includes('not found') || errorMsg.includes('invalid')) {
+                if (errorStatus === 429 || errorMsg.includes('429') || errorMsg.includes('rate limit')) {
+                    // Too many requests - show downloading placeholder
+                    console.log(`[RealDebrid] Rate limited, showing downloading placeholder`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/downloading_v2.mp4`);
+                }
+
+                if (errorStatus === 400 || errorStatus === 404 || errorMsg.includes('400') || errorMsg.includes('not found') || errorMsg.includes('invalid')) {
                     // Torrent not available or invalid
-                    console.log(`[RealDebrid] Torrent not available (400/404)`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                    console.log(`[RealDebrid] Torrent not available (${errorStatus || '400/404'})`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                 }
 
                 if (errorMsg.includes('rar') || errorMsg.includes('zip')) {
                     // Archive format not supported
                     console.log(`[RealDebrid] Archive format not supported`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_rar_v2.mp4`);
                 }
 
                 if (errorMsg.includes('magnet')) {
                     // Magnet error
                     console.log(`[RealDebrid] Magnet conversion error`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_opening_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_opening_v2.mp4`);
                 }
 
                 // Generic error: show failed placeholder
                 console.log(`[RealDebrid] Generic error, showing failed video`);
-                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
             }
         }
 
@@ -13512,7 +13570,7 @@ export default async function handler(req, res) {
                             } catch (mfError) {
                                 console.error(`❌ Failed to apply MediaFlow proxy: ${mfError.message}`);
                                 // 🛑 STOP! Do not fallback to direct link to avoid bans.
-                                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                             }
                         }
 
@@ -14182,7 +14240,7 @@ export default async function handler(req, res) {
                     let result = await _unrestrictLink(torrent);
                     if (result === 'FAILED_RAR') {
                         console.log(`[Torbox] Failed: RAR archive`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_rar_v2.mp4`);
                     }
 
                     // ⏩ INTROSKIP: Wrap in HLS proxy if enabled for series
@@ -14209,17 +14267,17 @@ export default async function handler(req, res) {
 
                 } else if (torrent && statusDownloading(torrent)) {
                     console.log(`[Torbox] Downloading to TorBox ${infoHash}...`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/downloading_v2.mp4`);
 
                 } else if (torrent && statusError(torrent)) {
                     console.log(`[Torbox] Retry failed download in TorBox ${JSON.stringify(torrent)}...`);
                     await torbox.deleteTorrent(torrent.id);
                     const retryResult = await _retryCreateTorrent();
                     if (retryResult === 'FAILED_DOWNLOAD') {
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                     }
                     if (retryResult === 'FAILED_RAR') {
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_rar_v2.mp4`);
                     }
                     return res.redirect(302, retryResult);
                 }
@@ -14235,18 +14293,18 @@ export default async function handler(req, res) {
                 if (errorMsg.includes('400') || errorMsg.includes('not found') || errorMsg.includes('invalid')) {
                     // Torrent not available or invalid
                     console.log(`[Torbox] Torrent not available (400/404)`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                 }
 
                 if (errorMsg.includes('rar') || errorMsg.includes('zip')) {
                     // Archive format not supported
                     console.log(`[Torbox] Archive format not supported`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_rar_v2.mp4`);
                 }
 
                 // Generic error: show failed placeholder
                 console.log(`[Torbox] Generic error, showing failed video`);
-                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
             }
         }
 
@@ -14262,17 +14320,17 @@ export default async function handler(req, res) {
                 userConfig = JSON.parse(decodeBase64Url(encodedConfigStr));
             } catch (e) {
                 console.error(`[AllDebrid] Config error: ${e.message}`);
-                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
             }
 
             if (!userConfig.alldebrid_key) {
                 console.error(`[AllDebrid] API key not configured`);
-                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_access_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_access_v2.mp4`);
             }
 
             if (!encodedMagnet) {
                 console.error(`[AllDebrid] Invalid magnet link`);
-                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
             }
 
             try {
@@ -14313,7 +14371,7 @@ export default async function handler(req, res) {
 
                     if (files.length === 0) {
                         console.log(`[AllDebrid] No files found`);
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                     }
 
                     // Find video files
@@ -14337,9 +14395,9 @@ export default async function handler(req, res) {
                         // Check if it's a RAR archive
                         if (files.some(f => (f.filename || '').endsWith('.rar') || (f.filename || '').endsWith('.zip'))) {
                             console.log(`[AllDebrid] Failed: RAR archive`);
-                            return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
+                            return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_rar_v2.mp4`);
                         }
-                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                     }
 
                     // STEP 4: Unlock the link
@@ -14353,12 +14411,12 @@ export default async function handler(req, res) {
                 } else if (status === 'Downloading' || status === 1 || status === 'Processing' || status === 2) {
                     // ⏳ DOWNLOADING/PROCESSING: Show placeholder video
                     console.log(`[AllDebrid] Magnet is downloading/processing (status: ${status})...`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/downloading_v2.mp4`);
 
                 } else {
                     // ❌ ERROR or UNKNOWN: Show failed video
                     console.log(`[AllDebrid] Unexpected status: ${status}`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                 }
 
             } catch (error) {
@@ -14369,17 +14427,17 @@ export default async function handler(req, res) {
 
                 if (errorMsg.includes('400') || errorMsg.includes('not found') || errorMsg.includes('invalid')) {
                     console.log(`[AllDebrid] Torrent not available (400/404)`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
                 }
 
                 if (errorMsg.includes('rar') || errorMsg.includes('zip')) {
                     console.log(`[AllDebrid] Archive format not supported`);
-                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/failed_rar_v2.mp4`);
                 }
 
                 // Generic error: show failed placeholder
                 console.log(`[AllDebrid] Generic error, showing failed video`);
-                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/video/download_failed_v2.mp4`);
             }
         }
 
