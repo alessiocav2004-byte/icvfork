@@ -9972,6 +9972,25 @@ async function handleStream(type, id, config, workerOrigin) {
             console.log(`🇮🇹 [FULL ITA] Filtered ${beforeCount} → ${filteredResults.length} results (strict ITA mode)`);
         }
 
+        // 🚫 RD BLOCKED FILTER: Remove torrents matching blocked patterns (only for Real-Debrid)
+        if (config.rd_blocked_filter && config.use_rd && config.rd_blocked_regex) {
+            const beforeCount = filteredResults.length;
+            try {
+                const rdBlockedRegex = new RegExp(config.rd_blocked_regex, 'i');
+                filteredResults = filteredResults.filter(result => {
+                    const title = result.title || result.websiteTitle || '';
+                    if (rdBlockedRegex.test(title)) {
+                        if (DEBUG_MODE) console.log(`🚫 [RD BLOCKED] Filtered out: "${title.substring(0, 60)}..."`);
+                        return false;
+                    }
+                    return true;
+                });
+                console.log(`🚫 [RD BLOCKED] Filtered ${beforeCount} → ${filteredResults.length} results (RD blocked patterns)`);
+            } catch (e) {
+                console.error(`🚫 [RD BLOCKED] Invalid regex: ${config.rd_blocked_regex}`, e.message);
+            }
+        }
+
         // Limit results for performance (after all filters)
         const maxResults = 30;
 
