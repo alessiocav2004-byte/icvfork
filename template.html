@@ -656,6 +656,22 @@
                     <a href="https://real-debrid.com/apitoken" target="_blank"
                         style="color: #4EC9B0; text-decoration: none;">Clicca qui per la tua chiave 🔑</a>
                 </div>
+                <!-- RD Blocked Filter -->
+                <div id="rd_blocked_filter_container" style="display: none; margin-top: 10px;">
+                    <label style="display: flex; align-items: center; padding: 10px 12px; background: rgba(220, 38, 38, 0.18); border: 2px solid rgba(239, 68, 68, 0.55); border-radius: 8px; cursor: pointer; color: #fecaca; font-weight: 600;">
+                        <input type="checkbox" id="rd_blocked_filter" style="width: 18px; height: 18px; margin-right: 10px; accent-color: #ef4444;">
+                        <span>Filtra 🧲 bloccati da RD</span>
+                    </label>
+                    <!-- Regex Frame (visible when checkbox is active) -->
+                    <div id="rd_blocked_regex_frame" style="display: none; margin-top: 8px; background: rgba(220, 38, 38, 0.10); border: 1px solid rgba(239, 68, 68, 0.35); border-radius: 6px; padding: 10px;">
+                        <small style="color: #fca5a5; display: block; margin-bottom: 6px;">Pattern regex bloccati:</small>
+                        <textarea id="rd_blocked_regex" rows="2" readonly style="width: 100%; background: rgba(0,0,0,0.3); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 4px; padding: 6px; font-family: monospace; font-size: 0.85em; resize: vertical;">\[(rartv|rarbg|eztv)\]|\b(YTS|Erai-raws|WEBRip|WEB-DL|AMZN|DSNP|CR)\b</textarea>
+                        <label style="display: flex; align-items: center; margin-top: 8px; cursor: pointer; color: #fca5a5; font-size: 0.85em;">
+                            <input type="checkbox" id="rd_blocked_regex_edit" style="width: 16px; height: 16px; margin-right: 8px; accent-color: #ef4444;">
+                            <span>Edita Regex</span>
+                        </label>
+                    </div>
+                </div>
             </div>
 
             <!-- Torbox -->
@@ -1201,6 +1217,47 @@
             useRdCheckbox.addEventListener('change', () => {
                 rdKeyInput.disabled = !useRdCheckbox.checked;
                 if (!useRdCheckbox.checked) rdKeyInput.value = '';
+                // Show/hide RD blocked filter container
+                const rdFilterContainer = document.getElementById('rd_blocked_filter_container');
+                if (rdFilterContainer) {
+                    rdFilterContainer.style.display = (useRdCheckbox.checked && rdKeyInput.value.trim()) ? 'block' : 'none';
+                    if (!useRdCheckbox.checked) {
+                        document.getElementById('rd_blocked_filter').checked = false;
+                        document.getElementById('rd_blocked_regex_frame').style.display = 'none';
+                    }
+                }
+                updateInstallLink();
+            });
+
+            // Show/hide RD blocked filter when key is entered
+            rdKeyInput.addEventListener('input', () => {
+                const rdFilterContainer = document.getElementById('rd_blocked_filter_container');
+                if (rdFilterContainer) {
+                    rdFilterContainer.style.display = (useRdCheckbox.checked && rdKeyInput.value.trim()) ? 'block' : 'none';
+                }
+                updateInstallLink();
+            });
+
+            // RD Blocked Filter checkbox: show/hide regex frame
+            document.getElementById('rd_blocked_filter').addEventListener('change', function() {
+                document.getElementById('rd_blocked_regex_frame').style.display = this.checked ? 'block' : 'none';
+                if (!this.checked) {
+                    document.getElementById('rd_blocked_regex_edit').checked = false;
+                    document.getElementById('rd_blocked_regex').readOnly = true;
+                }
+                updateInstallLink();
+            });
+
+            // RD Blocked Regex Edit checkbox: toggle editability
+            document.getElementById('rd_blocked_regex_edit').addEventListener('change', function() {
+                const regexField = document.getElementById('rd_blocked_regex');
+                regexField.readOnly = !this.checked;
+                if (this.checked) regexField.focus();
+                updateInstallLink();
+            });
+
+            // Update link when regex is edited
+            document.getElementById('rd_blocked_regex').addEventListener('input', () => {
                 updateInstallLink();
             });
 
@@ -1340,6 +1397,15 @@
                     if (rdKey) {
                         config.use_rd = true;
                         config.rd_key = rdKey;
+                        // RD Blocked Filter
+                        const rdBlockedFilter = document.getElementById('rd_blocked_filter');
+                        if (rdBlockedFilter && rdBlockedFilter.checked) {
+                            config.rd_blocked_filter = true;
+                            const rdBlockedRegex = document.getElementById('rd_blocked_regex');
+                            if (rdBlockedRegex) {
+                                config.rd_blocked_regex = rdBlockedRegex.value;
+                            }
+                        }
                     }
                 }
 
@@ -1552,6 +1618,22 @@
                             if (cfg.rd_key) {
                                 rdKeyInput.value = cfg.rd_key;
                                 console.log('✅ Loaded rd_key');
+                            }
+                            // RD Blocked Filter
+                            const rdFilterContainer = document.getElementById('rd_blocked_filter_container');
+                            if (rdFilterContainer && cfg.rd_key) {
+                                rdFilterContainer.style.display = 'block';
+                            }
+                            if (cfg.rd_blocked_filter) {
+                                const rdBlockedFilterCb = document.getElementById('rd_blocked_filter');
+                                if (rdBlockedFilterCb) {
+                                    rdBlockedFilterCb.checked = true;
+                                    document.getElementById('rd_blocked_regex_frame').style.display = 'block';
+                                }
+                                if (cfg.rd_blocked_regex) {
+                                    const regexField = document.getElementById('rd_blocked_regex');
+                                    if (regexField) regexField.value = cfg.rd_blocked_regex;
+                                }
                             }
                         }
                     }
