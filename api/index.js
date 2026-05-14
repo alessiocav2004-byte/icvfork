@@ -9972,25 +9972,6 @@ async function handleStream(type, id, config, workerOrigin) {
             console.log(`🇮🇹 [FULL ITA] Filtered ${beforeCount} → ${filteredResults.length} results (strict ITA mode)`);
         }
 
-        // 🚫 RD BLOCKED FILTER: Remove torrents matching blocked patterns (only for Real-Debrid)
-        if (config.rd_blocked_filter && config.use_rd && config.rd_blocked_regex) {
-            const beforeCount = filteredResults.length;
-            try {
-                const rdBlockedRegex = new RegExp(config.rd_blocked_regex, 'i');
-                filteredResults = filteredResults.filter(result => {
-                    const title = result.title || result.websiteTitle || '';
-                    if (rdBlockedRegex.test(title)) {
-                        if (DEBUG_MODE) console.log(`🚫 [RD BLOCKED] Filtered out: "${title.substring(0, 60)}..."`);
-                        return false;
-                    }
-                    return true;
-                });
-                console.log(`🚫 [RD BLOCKED] Filtered ${beforeCount} → ${filteredResults.length} results (RD blocked patterns)`);
-            } catch (e) {
-                console.error(`🚫 [RD BLOCKED] Invalid regex: ${config.rd_blocked_regex}`, e.message);
-            }
-        }
-
         // Limit results for performance (after all filters)
         const maxResults = 30;
 
@@ -10697,8 +10678,21 @@ async function handleStream(type, id, config, workerOrigin) {
                     // ✅ Apply custom formatter if configured
                     applyCustomFormatter(rdStream, result, config, 'RD', isCached);
 
+                    // 🚫 RD BLOCKED FILTER: Skip RD stream if title matches blocked regex
+                    let rdBlocked = false;
+                    if (config.rd_blocked_filter && config.rd_blocked_regex) {
+                        try {
+                            const rdBlockedRegex = new RegExp(config.rd_blocked_regex, 'i');
+                            const titleToCheck = result.title || result.websiteTitle || '';
+                            if (rdBlockedRegex.test(titleToCheck)) {
+                                rdBlocked = true;
+                                if (DEBUG_MODE) console.log(`🚫 [RD BLOCKED] Skipped RD stream: "${titleToCheck.substring(0, 60)}..."`);
+                            }
+                        } catch (e) { /* invalid regex, skip filter */ }
+                    }
+
                     // ⚡ ONLY CACHED FILTER
-                    if (!config.only_debrid_cache || isCached) {
+                    if (!rdBlocked && (!config.only_debrid_cache || isCached)) {
                         streams.push(rdStream);
                     }
                 }
