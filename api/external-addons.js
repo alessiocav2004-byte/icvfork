@@ -1,6 +1,6 @@
 /**
  * External Addon Integration Module
- * 
+ *
  * Integra Torrentio, MediaFusion e Comet per aggregare risultati da addon esterni.
  * Gestisce chiamate parallele, normalizzazione e deduplicazione.
  */
@@ -524,7 +524,7 @@ async function fetchExternalAddon(addonKey, type, id) {
 
 /**
  * Normalizza uno stream dall'addon esterno nel formato interno
- * 
+ *
  * @param {Object} stream - Stream originale dall'addon
  * @param {string} addonKey - Chiave addon sorgente
  * @returns {Object} Stream normalizzato
@@ -637,7 +637,7 @@ function buildMagnetLink(infoHash, sources) {
 
 /**
  * Chiama TUTTI gli addon esterni in parallelo
- * 
+ *
  * @param {string} type - Tipo media (movie, series)
  * @param {string} id - ID Stremio
  * @param {Object} options - Opzioni: { enabledAddons: ['torrentio', 'mediafusion', 'comet'] }
@@ -680,7 +680,7 @@ async function fetchAllExternalAddons(type, id, options = {}) {
 
 /**
  * Ritorna un array "flat" di tutti i risultati esterni, già normalizzati
- * 
+ *
  * @param {string} type - Tipo media
  * @param {string} id - ID Stremio
  * @param {Object} options - Opzioni
