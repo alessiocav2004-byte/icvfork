@@ -1,7 +1,8 @@
 name: Build & Push Docker Image
 
 on:
-  # L'azione si attiva SOLO quando un altro workflow finisce
+  workflow_dispatch:
+  
   workflow_run:
     workflows: ["Sync fork"]
     types:
@@ -11,8 +12,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     
-    # Esegue questo job solo se il workflow di sync ha avuto successo (non se è fallito)
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     
     permissions:
       contents: read
