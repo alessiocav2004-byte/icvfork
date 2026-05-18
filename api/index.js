@@ -4678,7 +4678,11 @@ class Torbox {
             throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
         }
 
-        return data.data || [];
+        // ✅ FIX: When filtering by ?id=X, Torbox returns a SINGLE OBJECT, not an array.
+        // Without id, it returns an array. Normalize to always return an array.
+        const payload = data.data;
+        if (!payload) return [];
+        return Array.isArray(payload) ? payload : [payload];
     }
 
     async deleteTorrent(torrentId) {
