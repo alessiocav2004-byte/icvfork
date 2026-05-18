@@ -4702,7 +4702,9 @@ class Torbox {
     }
 
     async getTorrentInfo(torrentId) {
-        const torrents = await this.getTorrents();
+        // ⚡ PERF: Use ?id=X to fetch ONLY this torrent instead of the entire user library.
+        // For users with large libraries this saves multiple seconds per stream click.
+        const torrents = await this.getTorrents(torrentId);
         const torrent = torrents.find(t => t.id === parseInt(torrentId));
 
         if (!torrent) {
@@ -14051,13 +14053,16 @@ export default async function handler(req, res) {
                     throw new Error(`Unexpected create data: ${JSON.stringify(data)}`);
                 };
 
-                // _createOrFindTorrent (EXACT Torrentio logic)
+                // _createOrFindTorrent (⚡ OPTIMIZED — Nuvio-style)
+                // Previously: _findTorrent() scanned the ENTIRE user mylist to dedupe by hash.
+                // For users with large libraries this added 2-5s per stream click.
+                // Torbox itself dedupes server-side on hash when calling createtorrent again:
+                //   - if already in library → returns the existing torrent_id (no duplicate)
+                //   - if cached but not in library → adds and returns torrent_id immediately
+                //   - if not cached → queues download and returns queued_id (metaDL flow unchanged)
+                // So we skip the mylist scan and rely on TB's server-side dedup.
                 const _createOrFindTorrent = async () => {
-                    try {
-                        return await _findTorrent();
-                    } catch {
-                        return await _createTorrent();
-                    }
+                    return await _createTorrent();
                 };
 
                 // _unrestrictLink (with episode pattern matching for packs AND movie pack support)
